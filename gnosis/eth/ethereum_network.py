@@ -117,6 +117,7 @@ class EthereumNetwork(Enum):
     CLOVER_TESTNET = 1023
     CLOVER = 1024
     METIS = 1088
+    CORE_CHAIN_TESTNET = 1115
     MATH = 1139
     MATH_TESTNET = 1140
     MOON_MOONBEAM = 1284
