@@ -34,7 +34,7 @@ class EtherscanClient:
         EthereumNetwork.ARBITRUM: "https://arbiscan.io",
         EthereumNetwork.AVALANCHE: "https://snowtrace.io",
         EthereumNetwork.CORE_CHAIN_TESTNET: "https://scan.test.btcs.network",
-        EthereumNetwork.CORE_CHAIN_MAINNET: "https://scantest.coredao.org",
+        EthereumNetwork.CORE_CHAIN_MAINNET: "https://scan.coredao.org",
     }
 
     NETWORK_WITH_API_URL = {
@@ -49,7 +49,7 @@ class EtherscanClient:
         EthereumNetwork.ARBITRUM: "https://api.arbiscan.io",
         EthereumNetwork.AVALANCHE: "https://api.snowtrace.io",
         EthereumNetwork.CORE_CHAIN_TESTNET: "https://api.test.btcs.network/api",
-        EthereumNetwork.CORE_CHAIN_MAINNET: "https://openapitest.coredao.org/api",
+        EthereumNetwork.CORE_CHAIN_MAINNET: "https://openapi.coredao.org/api",
     }
     HTTP_HEADERS = {
         "User-Agent": "curl/7.77.0",
