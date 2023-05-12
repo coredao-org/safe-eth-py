@@ -1,5 +1,12 @@
 from typing import Any, Iterable, List
 
+try:
+    from functools import cache
+except ImportError:
+    from functools import lru_cache
+
+    cache = lru_cache(maxsize=None)
+
 
 def chunks(elements: List[Any], n: int) -> Iterable[Any]:
     """

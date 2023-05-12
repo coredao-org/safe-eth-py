@@ -1,6 +1,6 @@
 import os
 from enum import Enum
-from functools import wraps
+from functools import cached_property, wraps
 from logging import getLogger
 from typing import (
     Any,
@@ -27,27 +27,26 @@ from web3._utils.abi import map_abi_data
 from web3._utils.method_formatters import (
     block_formatter,
     receipt_formatter,
+    trace_list_result_formatter,
     transaction_result_formatter,
 )
 from web3._utils.normalizers import BASE_RETURN_NORMALIZERS
-from web3.contract import ContractFunction
-from web3.datastructures import AttributeDict
+from web3.contract.contract import ContractFunction
 from web3.exceptions import (
-    BadFunctionCallOutput,
     BlockNotFound,
     TimeExhausted,
     TransactionNotFound,
+    Web3Exception,
 )
 from web3.middleware import geth_poa_middleware, simple_cache_middleware
 from web3.types import (
     BlockData,
     BlockIdentifier,
+    BlockTrace,
     FilterParams,
+    FilterTrace,
     LogReceipt,
     Nonce,
-    ParityBlockTrace,
-    ParityFilterParams,
-    ParityFilterTrace,
     TxData,
     TxParams,
     TxReceipt,
@@ -59,7 +58,7 @@ from gnosis.eth.utils import (
     fast_to_checksum_address,
     mk_contract_address,
 )
-from gnosis.util import chunks
+from gnosis.util import cache, chunks
 
 from .constants import (
     ERC20_721_TRANSFER_TOPIC,
@@ -80,7 +79,6 @@ from .exceptions import (
     InvalidNonce,
     NonceTooHigh,
     NonceTooLow,
-    ParityTraceDecodeException,
     ReplacementTransactionUnderpriced,
     SenderAccountNotFoundInNode,
     TransactionAlreadyImported,
@@ -91,26 +89,12 @@ from .exceptions import (
 from .typing import BalanceDict, EthereumData, EthereumHash
 from .utils import decode_string_or_bytes32
 
-try:
-    from functools import cached_property
-except ImportError:
-    from cached_property import cached_property
-
-
-try:
-    from functools import cache
-except ImportError:
-    from functools import lru_cache
-
-    cache = lru_cache(maxsize=None)
-
-
 logger = getLogger(__name__)
 
 
 def tx_with_exception_handling(func):
     """
-    Parity
+    Parity / OpenEthereum
         - https://github.com/openethereum/openethereum/blob/main/rpc/src/v1/helpers/errors.rs
     Geth
         - https://github.com/ethereum/go-ethereum/blob/master/core/error.go
@@ -147,7 +131,7 @@ def tx_with_exception_handling(func):
     def with_exception_handling(*args, **kwargs):
         try:
             return func(*args, **kwargs)
-        except ValueError as exc:
+        except (Web3Exception, ValueError) as exc:
             str_exc = str(exc).lower()
             for reason, custom_exception in error_with_exception.items():
                 if reason.lower() in str_exc:
@@ -304,7 +288,7 @@ class BatchCallManager(EthereumClientManager):
             else:
                 output_type = payload["output_type"]
                 try:
-                    decoded_values = self.w3.codec.decode_abi(
+                    decoded_values = eth_abi.decode(
                         output_type, HexBytes(result["result"])
                     )
                     normalized_data = map_abi_data(
@@ -444,7 +428,7 @@ class Erc20Manager(EthereumClientManager):
             if topics_len == 1:
                 # Not standard Transfer(address from, address to, uint256 unknown)
                 # 1 topic (transfer topic)
-                _from, to, unknown = eth_abi.decode_abi(
+                _from, to, unknown = eth_abi.decode(
                     ["address", "address", "uint256"], HexBytes(data)
                 )
                 return {"from": _from, "to": to, "unknown": unknown}
@@ -453,7 +437,7 @@ class Erc20Manager(EthereumClientManager):
                 # 3 topics (transfer topic + from + to)
                 try:
                     value_data = HexBytes(data)
-                    value = eth_abi.decode_single("uint256", value_data)
+                    value = eth_abi.decode(["uint256"], value_data)[0]
                 except DecodingError:
                     logger.warning(
                         "Cannot decode Transfer event `uint256 value` from data=%s",
@@ -464,7 +448,7 @@ class Erc20Manager(EthereumClientManager):
                     from_to_data = b"".join(topics[1:])
                     _from, to = (
                         fast_to_checksum_address(address)
-                        for address in eth_abi.decode_abi(
+                        for address in eth_abi.decode(
                             ["address", "address"], from_to_data
                         )
                     )
@@ -478,7 +462,7 @@ class Erc20Manager(EthereumClientManager):
             elif topics_len == 4:
                 # ERC712 Transfer(address indexed from, address indexed to, uint256 indexed tokenId)
                 # 4 topics (transfer topic + from + to + tokenId)
-                _from, to, token_id = eth_abi.decode_abi(
+                _from, to, token_id = eth_abi.decode(
                     ["address", "address", "uint256"], b"".join(topics[1:])
                 )
                 _from, to = [
@@ -599,9 +583,9 @@ class Erc20Manager(EthereumClientManager):
             results = [HexBytes(r["result"]) for r in response_json]
             name = decode_string_or_bytes32(results[0])
             symbol = decode_string_or_bytes32(results[1])
-            decimals = self.ethereum_client.w3.codec.decode_single("uint8", results[2])
+            decimals = eth_abi.decode(["uint8"], results[2])[0]
             return Erc20Info(name, symbol, decimals)
-        except (ValueError, BadFunctionCallOutput, DecodingError) as e:
+        except (Web3Exception, DecodingError, ValueError) as e:
             raise InvalidERC20Info from e
 
     def get_total_transfer_history(
@@ -684,7 +668,7 @@ class Erc20Manager(EthereumClientManager):
         topic_0 = self.TRANSFER_TOPIC.hex()
         if addresses:
             addresses_encoded = [
-                HexBytes(eth_abi.encode_single("address", address)).hex()
+                HexBytes(eth_abi.encode(["address"], [address])).hex()
                 for address in addresses
             ]
             # Topics for transfer `to` and `from` an address
@@ -766,7 +750,7 @@ class Erc20Manager(EthereumClientManager):
         if to_address:
             argument_filters["to"] = to_address
 
-        return erc20.events.Transfer.createFilter(
+        return erc20.events.Transfer.create_filter(
             fromBlock=from_block,
             toBlock=to_block,
             address=token_address,
@@ -916,79 +900,7 @@ class Erc721Manager(EthereumClientManager):
         ]
 
 
-class ParityManager(EthereumClientManager):
-    # TODO Test with mock
-    def _decode_trace_action(self, action: Dict[str, Any]) -> Dict[str, Any]:
-        decoded = {}
-
-        # CALL, DELEGATECALL, CREATE or CREATE2
-        if "from" in action:
-            decoded["from"] = fast_to_checksum_address(action["from"])
-        if "gas" in action:
-            decoded["gas"] = int(action["gas"], 16)
-        if "value" in action:
-            decoded["value"] = int(action["value"], 16)
-
-        # CALL or DELEGATECALL
-        if "callType" in action:
-            decoded["callType"] = action["callType"]
-        if "input" in action:
-            decoded["input"] = HexBytes(action["input"])
-        if "to" in action:
-            decoded["to"] = fast_to_checksum_address(action["to"])
-
-        # CREATE or CREATE2
-        if "init" in action:
-            decoded["init"] = HexBytes(action["init"])
-
-        # SELF-DESTRUCT
-        if "address" in action:
-            decoded["address"] = fast_to_checksum_address(action["address"])
-        if "balance" in action:
-            decoded["balance"] = int(action["balance"], 16)
-        if "refundAddress" in action:
-            decoded["refundAddress"] = fast_to_checksum_address(action["refundAddress"])
-
-        return decoded
-
-    def _decode_trace_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
-        decoded: Dict[str, Any] = {
-            "gasUsed": int(result["gasUsed"], 16),
-        }
-
-        # CALL or DELEGATECALL
-        if "output" in result:
-            decoded["output"] = HexBytes(result["output"])
-
-        # CREATE or CREATE2
-        if "code" in result:
-            decoded["code"] = HexBytes(result["code"])
-        if "address" in result:
-            decoded["address"] = fast_to_checksum_address(result["address"])
-
-        return decoded
-
-    def _decode_traces(
-        self, traces: Sequence[Union[ParityBlockTrace, ParityFilterTrace]]
-    ) -> List[Dict[str, Any]]:
-        new_traces: List[Dict[str, Any]] = []
-        for trace in traces:
-            if isinstance(trace, dict):
-                trace_copy = trace.copy()
-            elif isinstance(trace, AttributeDict):
-                trace_copy = trace.__dict__.copy()
-            else:
-                raise ParityTraceDecodeException(
-                    "Expected dictionary, but found unexpected trace %s" % trace
-                )
-            new_traces.append(trace_copy)
-            # Txs with `error` field don't have `result` field
-            # Txs with `type=suicide` have `result` field but is `None`
-            if "result" in trace and trace["result"]:
-                trace_copy["result"] = self._decode_trace_result(trace["result"])
-            trace_copy["action"] = self._decode_trace_action(trace["action"])
-        return new_traces
-
+class TracingManager(EthereumClientManager):
     def filter_out_errored_traces(
         self, internal_txs: Sequence[Dict[str, Any]]
     ) -> Sequence[Dict[str, Any]]:
@@ -1078,16 +990,8 @@ class ParityManager(EthereumClientManager):
                     traces.append(trace)
         return traces
 
-    def trace_block(self, block_identifier: BlockIdentifier) -> List[Dict[str, Any]]:
-        try:
-            return self._decode_traces(
-                self.slow_w3.parity.trace_block(block_identifier)
-            )
-        except ParityTraceDecodeException as exc:
-            logger.warning("Problem decoding trace: %s - Retrying", exc)
-            return self._decode_traces(
-                self.slow_w3.parity.trace_block(block_identifier)
-            )
+    def trace_block(self, block_identifier: BlockIdentifier) -> List[BlockTrace]:
+        return self.slow_w3.tracing.trace_block(block_identifier)
 
     def trace_blocks(
         self, block_identifiers: List[BlockIdentifier]
@@ -1109,33 +1013,18 @@ class ParityManager(EthereumClientManager):
         ]
 
         results = self.ethereum_client.raw_batch_request(payload)
-        traces = []
-        for raw_tx in results:
-            if raw_tx:
-                try:
-                    decoded_traces = self._decode_traces(raw_tx)
-                except ParityTraceDecodeException as exc:
-                    logger.warning("Problem decoding trace: %s - Retrying", exc)
-                    decoded_traces = self._decode_traces(raw_tx)
-                traces.append(decoded_traces)
-            else:
-                traces.append([])
-        return traces
+        return [trace_list_result_formatter(block_traces) for block_traces in results]
 
-    def trace_transaction(self, tx_hash: EthereumHash) -> List[Dict[str, Any]]:
+    def trace_transaction(self, tx_hash: EthereumHash) -> List[FilterTrace]:
         """
         :param tx_hash:
         :return: List of internal txs for `tx_hash`
         """
-        try:
-            return self._decode_traces(self.slow_w3.parity.trace_transaction(tx_hash))
-        except ParityTraceDecodeException as exc:
-            logger.warning("Problem decoding trace: %s - Retrying", exc)
-            return self._decode_traces(self.slow_w3.parity.trace_transaction(tx_hash))
+        return self.slow_w3.tracing.trace_transaction(tx_hash)
 
     def trace_transactions(
         self, tx_hashes: Sequence[EthereumHash]
-    ) -> List[List[Dict[str, Any]]]:
+    ) -> List[List[FilterTrace]]:
         """
         :param tx_hashes:
         :return: For every `tx_hash` a list of internal txs (in the same order as the `tx_hashes` were provided)
@@ -1152,18 +1041,7 @@ class ParityManager(EthereumClientManager):
             for i, tx_hash in enumerate(tx_hashes)
         ]
         results = self.ethereum_client.raw_batch_request(payload)
-        traces = []
-        for raw_tx in results:
-            if raw_tx:
-                try:
-                    decoded_traces = self._decode_traces(raw_tx)
-                except ParityTraceDecodeException as exc:
-                    logger.warning("Problem decoding trace: %s - Retrying", exc)
-                    decoded_traces = self._decode_traces(raw_tx)
-                traces.append(decoded_traces)
-            else:
-                traces.append([])
-        return traces
+        return [trace_list_result_formatter(tx_traces) for tx_traces in results]
 
     def trace_filter(
         self,
@@ -1173,7 +1051,7 @@ class ParityManager(EthereumClientManager):
         to_address: Optional[Sequence[ChecksumAddress]] = None,
         after: Optional[int] = None,
         count: Optional[int] = None,
-    ) -> List[Dict[str, Any]]:
+    ) -> List[FilterTrace]:
         """
         Get events using ``trace_filter`` method
 
@@ -1250,7 +1128,7 @@ class ParityManager(EthereumClientManager):
         assert (
             from_address or to_address
         ), "You must provide at least `from_address` or `to_address`"
-        parameters: ParityFilterParams = {}
+        parameters: FilterParams = {}
         if after:
             parameters["after"] = after
         if count:
@@ -1264,11 +1142,7 @@ class ParityManager(EthereumClientManager):
         if to_address:
             parameters["toAddress"] = to_address
 
-        try:
-            return self._decode_traces(self.slow_w3.parity.trace_filter(parameters))
-        except ParityTraceDecodeException as exc:
-            logger.warning("Problem decoding trace: %s - Retrying", exc)
-            return self._decode_traces(self.slow_w3.parity.trace_filter(parameters))
+        return self.slow_w3.tracing.trace_filter(parameters)
 
 
 class EthereumClient:
@@ -1314,7 +1188,7 @@ class EthereumClient:
         self.slow_w3: Web3 = Web3(self.w3_slow_provider)
         self.erc20: Erc20Manager = Erc20Manager(self)
         self.erc721: Erc721Manager = Erc721Manager(self)
-        self.parity: ParityManager = ParityManager(self)
+        self.tracing: TracingManager = TracingManager(self)
         self.batch_call_manager: BatchCallManager = BatchCallManager(self)
         try:
             if self.get_network() != EthereumNetwork.MAINNET:
@@ -1421,10 +1295,11 @@ class EthereumClient:
 
     def get_network(self) -> EthereumNetwork:
         """
-        Get network name based on the chainId
+        Get network name based on the chainId. This method is not cached as the method for getting the
+        `chainId` already is.
 
         :return: EthereumNetwork based on the chainId. If network is not
-            on our list, `EthereumNetwork.UNKOWN` is returned
+            on our list, `EthereumNetwork.UNKNOWN` is returned
         """
         return EthereumNetwork(self.get_chain_id())
 
@@ -1436,7 +1311,7 @@ class EthereumClient:
         try:
             self.w3.eth.fee_history(1, "latest", reward_percentiles=[50])
             return True
-        except ValueError:
+        except (Web3Exception, ValueError):
             return False
 
     @cached_property
@@ -1458,7 +1333,7 @@ class EthereumClient:
         block_identifier: Optional[BlockIdentifier] = "latest",
     ) -> List[Optional[Union[bytes, Any]]]:
         """
-        Call multiple functions. Multicall contract by MakerDAO will be used by default if available
+        Call multiple functions. ``Multicall`` contract by MakerDAO will be used by default if available
 
         :param contract_functions:
         :param from_address: Only available when ``Multicall`` is not used
@@ -1497,7 +1372,7 @@ class EthereumClient:
         block_identifier: Optional[BlockIdentifier] = "latest",
     ) -> List[Optional[Union[bytes, Any]]]:
         """
-        Call the same function in multiple contracts. Way more optimal than using `batch_call` generating multiple
+        Call the same function in multiple contracts. Way more optimal than using ``batch_call`` generating multiple
         ``ContractFunction`` objects.
 
         :param contract_function:
@@ -1547,6 +1422,7 @@ class EthereumClient:
                     "gasPrice": self.w3.eth.gas_price,
                     "value": Wei(0),
                     "to": contract_address if contract_address else "",
+                    "chainId": self.get_chain_id(),
                 }
                 tx["gas"] = self.w3.eth.estimate_gas(tx)
                 tx_hash = self.send_unsigned_transaction(
@@ -1619,7 +1495,7 @@ class EthereumClient:
             tx["gasPrice"] = gas_price
         try:
             return self.w3.eth.estimate_gas(tx, block_identifier=block_identifier)
-        except ValueError:
+        except (Web3Exception, ValueError):
             if (
                 block_identifier is not None
             ):  # Geth does not support setting `block_identifier`
@@ -1956,6 +1832,7 @@ class EthereumClient:
             "value": value,
             "gas": gas or Wei(self.estimate_gas(to, account.address, value)),
             "gasPrice": Wei(gas_price),
+            "chainId": self.get_chain_id(),
         }
 
         if nonce is not None:
