@@ -46,6 +46,7 @@ class EtherscanClient:
         EthereumNetwork.NEON_EVM_DEVNET: "https://neonscan.org",
         EthereumNetwork.CORE_BLOCKCHAIN_TESTNET: "https://scan.test.btcs.network",
         EthereumNetwork.CORE_BLOCKCHAIN_MAINNET: "https://scan.coredao.org",
+        EthereumNetwork.SEPOLIA: "https://sepolia.etherscan.io",
     }
 
     NETWORK_WITH_API_URL = {
@@ -72,12 +73,18 @@ class EtherscanClient:
         EthereumNetwork.NEON_EVM_DEVNET: "https://devnet-api.neonscan.org",
         EthereumNetwork.CORE_BLOCKCHAIN_TESTNET: "https://api.test.btcs.network/api",
         EthereumNetwork.CORE_BLOCKCHAIN_MAINNET: "https://openapi.coredao.org/api",
+        EthereumNetwork.SEPOLIA: "https://api-sepolia.etherscan.io",
     }
     HTTP_HEADERS = {
         "User-Agent": "curl/7.77.0",
     }
 
-    def __init__(self, network: EthereumNetwork, api_key: Optional[str] = None):
+    def __init__(
+        self,
+        network: EthereumNetwork,
+        api_key: Optional[str] = None,
+        request_timeout: int = 10,
+    ):
         self.network = network
         self.api_key = api_key
         self.base_url = self.NETWORK_WITH_URL.get(network)
@@ -86,8 +93,26 @@ class EtherscanClient:
             raise EtherscanClientConfigurationProblem(
                 f"Network {network.name} - {network.value} not supported"
             )
-        self.http_session = requests.Session()
+        self.http_session = self._prepare_http_session()
         self.http_session.headers = self.HTTP_HEADERS
+        self.request_timeout = request_timeout
+
+    def _prepare_http_session(self) -> requests.Session:
+        """
+        Prepare http session with custom pooling. See:
+        https://urllib3.readthedocs.io/en/stable/advanced-usage.html
+        https://docs.python-requests.org/en/v1.2.3/api/#requests.adapters.HTTPAdapter
+        https://web3py.readthedocs.io/en/stable/providers.html#httpprovider
+        """
+        session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=10,
+            pool_maxsize=100,
+            pool_block=False,
+        )
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        return session
 
     def build_url(self, path: str):
         url = urljoin(self.base_api_url, path)
@@ -96,7 +121,7 @@ class EtherscanClient:
         return url
 
     def _do_request(self, url: str) -> Optional[Dict[str, Any]]:
-        response = self.http_session.get(url)
+        response = self.http_session.get(url, timeout=self.request_timeout)
 
         if response.ok:
             response_json = response.json()

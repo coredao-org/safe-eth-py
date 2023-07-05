@@ -184,7 +184,7 @@ class EthereumClientProvider:
                 slow_provider_timeout=int(
                     os.environ.get("ETHEREUM_RPC_SLOW_TIMEOUT", 60)
                 ),
-                retry_count=int(os.environ.get("ETHEREUM_RPC_RETRY_COUNT", 60)),
+                retry_count=int(os.environ.get("ETHEREUM_RPC_RETRY_COUNT", 1)),
                 batch_request_max_size=int(
                     os.environ.get("ETHEREUM_RPC_BATCH_REQUEST_MAX_SIZE", 500)
                 ),
@@ -1158,7 +1158,7 @@ class EthereumClient:
         ethereum_node_url: URI = URI("http://localhost:8545"),
         provider_timeout: int = 15,
         slow_provider_timeout: int = 60,
-        retry_count: int = 3,
+        retry_count: int = 1,
         use_caching_middleware: bool = True,
         batch_request_max_size: int = 500,
     ):
@@ -1211,7 +1211,7 @@ class EthereumClient:
         """
         Prepare http session with custom pooling. See:
         https://urllib3.readthedocs.io/en/stable/advanced-usage.html
-        https://2.python-requests.org/en/latest/api/#requests.adapters.HTTPAdapter
+        https://docs.python-requests.org/en/v1.2.3/api/#requests.adapters.HTTPAdapter
         https://web3py.readthedocs.io/en/stable/providers.html#httpprovider
         """
         session = requests.Session()
