@@ -1,23 +1,50 @@
-import warnings
-from secrets import token_bytes
-from typing import Tuple, Union
+import os
+from functools import lru_cache
+from typing import Union
 
 import eth_abi
 from eth._utils.address import generate_contract_address
-from eth_keys import keys
-from eth_typing import AnyAddress, ChecksumAddress, HexStr
+from eth_account import Account
+from eth_typing import Address, AnyAddress, ChecksumAddress, Hash32, HexAddress, HexStr
 from eth_utils import to_normalized_address
 from hexbytes import HexBytes
 from sha3 import keccak_256
+from web3.types import TxParams, Wei
 
 
-def fast_keccak(value: bytes) -> bytes:
+def get_empty_tx_params() -> TxParams:
+    """
+    :return: Empty tx params, so calls like `build_transaction` don't call the RPC trying to get information
+    """
+    return {
+        "gas": Wei(1),
+        "gasPrice": Wei(1),
+    }
+
+
+@lru_cache(maxsize=int(os.getenv("CACHE_KECCAK", 512)))
+def _keccak_256(value: bytes) -> bytes:
+    return keccak_256(value)
+
+
+def fast_keccak(value: bytes) -> Hash32:
     """
     Calculates ethereum keccak256 using fast library `pysha3`
+
     :param value:
-    :return: Keccak256 used by ethereum as `bytes`
+    :return: Keccak256 used by ethereum as `HexBytes`
     """
-    return keccak_256(value).digest()
+    return HexBytes(_keccak_256(value).digest())
+
+
+def fast_keccak_text(value: str) -> Hash32:
+    """
+    Calculates ethereum keccak256 using fast library `pysha3`
+
+    :param value:
+    :return: Keccak256 used by ethereum as `HexBytes`
+    """
+    return fast_keccak(value.encode())
 
 
 def fast_keccak_hex(value: bytes) -> HexStr:
@@ -26,9 +53,9 @@ def fast_keccak_hex(value: bytes) -> HexStr:
     than calling `digest()` and then `hex()`
 
     :param value:
-    :return: Keccak256 used by ethereum as an hex string (not 0x prefixed)
+    :return: Keccak256 used by ethereum as a hex string (not 0x prefixed)
     """
-    return HexStr(keccak_256(value).hexdigest())
+    return HexStr(_keccak_256(value).hexdigest())
 
 
 def _build_checksum_address(
@@ -42,18 +69,28 @@ def _build_checksum_address(
     :return:
     """
     return ChecksumAddress(
-        "0x"
-        + (
-            "".join(
-                (
-                    norm_address[i].upper()
-                    if int(address_hash[i], 16) > 7
-                    else norm_address[i]
+        HexAddress(
+            HexStr(
+                "0x"
+                + (
+                    "".join(
+                        (
+                            norm_address[i].upper()
+                            if int(address_hash[i], 16) > 7
+                            else norm_address[i]
+                        )
+                        for i in range(0, 40)
+                    )
                 )
-                for i in range(0, 40)
             )
         )
     )
+
+
+@lru_cache(maxsize=int(os.getenv("CACHE_CHECKSUM_ADDRESS", 1_000_000_000)))
+def _fast_to_checksum_address(address: HexAddress):
+    address_hash = fast_keccak_hex(address.encode())
+    return _build_checksum_address(address, address_hash)
 
 
 def fast_to_checksum_address(value: Union[AnyAddress, str, bytes]) -> ChecksumAddress:
@@ -63,9 +100,14 @@ def fast_to_checksum_address(value: Union[AnyAddress, str, bytes]) -> ChecksumAd
     :param value:
     :return:
     """
-    norm_address = to_normalized_address(value)[2:]
-    address_hash = fast_keccak_hex(norm_address.encode())
-    return _build_checksum_address(norm_address, address_hash)
+    if isinstance(value, bytes):
+        if len(value) != 20:
+            raise ValueError(
+                "Cannot convert %s to a checksum address, 20 bytes were expected"
+            )
+
+    norm_address = HexAddress(HexStr(to_normalized_address(value)[2:]))
+    return _fast_to_checksum_address(norm_address)
 
 
 def fast_bytes_to_checksum_address(value: bytes) -> ChecksumAddress:
@@ -80,9 +122,8 @@ def fast_bytes_to_checksum_address(value: bytes) -> ChecksumAddress:
         raise ValueError(
             "Cannot convert %s to a checksum address, 20 bytes were expected"
         )
-    norm_address = bytes(value).hex()
-    address_hash = fast_keccak_hex(norm_address.encode())
-    return _build_checksum_address(norm_address, address_hash)
+    norm_address = HexAddress(HexStr(bytes(value).hex()))
+    return _fast_to_checksum_address(norm_address)
 
 
 def fast_is_checksum_address(value: Union[AnyAddress, str, bytes]) -> bool:
@@ -100,14 +141,8 @@ def fast_is_checksum_address(value: Union[AnyAddress, str, bytes]) -> bool:
         return False
 
 
-def get_eth_address_with_key() -> Tuple[str, bytes]:
-    private_key = keys.PrivateKey(token_bytes(32))
-    address = private_key.public_key.to_checksum_address()
-    return address, private_key.to_bytes()
-
-
 def get_eth_address_with_invalid_checksum() -> str:
-    address, _ = get_eth_address_with_key()
+    address = Account.create().address
     return "0x" + "".join(
         [c.lower() if c.isupper() else c.upper() for c in address[2:]]
     )
@@ -116,7 +151,7 @@ def get_eth_address_with_invalid_checksum() -> str:
 def decode_string_or_bytes32(data: bytes) -> str:
     try:
         return eth_abi.decode(["string"], data)[0]
-    except OverflowError:
+    except (OverflowError, eth_abi.exceptions.DecodingError):
         name = eth_abi.decode(["bytes32"], data)[0]
         end_position = name.find(b"\x00")
         if end_position == -1:
@@ -168,13 +203,16 @@ def mk_contract_address(address: Union[str, bytes], nonce: int) -> ChecksumAddre
     :param nonce:
     :return:
     """
-    return fast_to_checksum_address(generate_contract_address(HexBytes(address), nonce))
+    return fast_to_checksum_address(
+        generate_contract_address(Address(HexBytes(address)), nonce)
+    )
 
 
 def mk_contract_address_2(
-    from_: Union[str, bytes], salt: Union[str, bytes], init_code: Union[str, bytes]
+    from_: Union[ChecksumAddress, bytes],
+    salt: Union[HexStr, bytes],
+    init_code: Union[HexStr, bytes],
 ) -> ChecksumAddress:
-
     """
     Generate expected contract address when using EVM CREATE2.
 
@@ -195,21 +233,3 @@ def mk_contract_address_2(
     init_code_hash = fast_keccak(init_code)
     contract_address = fast_keccak(HexBytes("ff") + from_ + salt + init_code_hash)
     return fast_bytes_to_checksum_address(contract_address[12:])
-
-
-def generate_address_2(
-    from_: Union[str, bytes], salt: Union[str, bytes], init_code: Union[str, bytes]
-) -> ChecksumAddress:
-    """
-    .. deprecated:: use mk_contract_address_2
-
-    :param from_:
-    :param salt:
-    :param init_code:
-    :return:
-    """
-    warnings.warn(
-        "`generate_address_2` is deprecated, use `mk_contract_address_2`",
-        DeprecationWarning,
-    )
-    return mk_contract_address_2(from_, salt, init_code)

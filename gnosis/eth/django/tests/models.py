@@ -5,6 +5,8 @@ from ..models import (
     EthereumAddressV2Field,
     Keccak256Field,
     Sha3HashField,
+    Uint32Field,
+    Uint96Field,
     Uint256Field,
 )
 
@@ -19,6 +21,14 @@ class EthereumAddressV2(models.Model):
 
 class Uint256(models.Model):
     value = Uint256Field(null=True)
+
+
+class Uint96(models.Model):
+    value = Uint96Field(null=True)
+
+
+class Uint32(models.Model):
+    value = Uint32Field(null=True)
 
 
 class Sha3Hash(models.Model):

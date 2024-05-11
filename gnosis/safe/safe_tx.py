@@ -2,17 +2,20 @@ from functools import cached_property
 from typing import Any, Dict, List, NoReturn, Optional, Tuple, Type
 
 from eth_account import Account
+from eth_typing import ChecksumAddress
 from hexbytes import HexBytes
 from packaging.version import Version
+from web3.contract.contract import ContractFunction
 from web3.exceptions import Web3Exception
 from web3.types import BlockIdentifier, TxParams, Wei
 
 from gnosis.eth import EthereumClient
 from gnosis.eth.constants import NULL_ADDRESS
 from gnosis.eth.contracts import get_safe_contract
-from gnosis.eth.eip712 import eip712_encode_hash
+from gnosis.eth.eip712 import eip712_encode
 from gnosis.eth.ethereum_client import TxSpeed
 
+from ..eth.utils import fast_keccak
 from .exceptions import (
     CouldNotFinishInitialization,
     CouldNotPayGasWithEther,
@@ -41,19 +44,19 @@ class SafeTx:
     def __init__(
         self,
         ethereum_client: EthereumClient,
-        safe_address: str,
-        to: Optional[str],
+        safe_address: ChecksumAddress,
+        to: Optional[ChecksumAddress],
         value: int,
         data: bytes,
         operation: int,
         safe_tx_gas: int,
         base_gas: int,
         gas_price: int,
-        gas_token: Optional[str],
-        refund_receiver: Optional[str],
+        gas_token: Optional[ChecksumAddress],
+        refund_receiver: Optional[ChecksumAddress],
         signatures: Optional[bytes] = None,
         safe_nonce: Optional[int] = None,
-        safe_version: str = None,
+        safe_version: Optional[str] = None,
         chain_id: Optional[int] = None,
     ):
         """
@@ -119,7 +122,7 @@ class SafeTx:
             return self.ethereum_client.get_chain_id()
 
     @cached_property
-    def safe_nonce(self) -> str:
+    def safe_nonce(self) -> int:
         if self._safe_nonce is not None:
             return self._safe_nonce
         else:
@@ -183,8 +186,12 @@ class SafeTx:
         return payload
 
     @property
+    def safe_tx_hash_preimage(self) -> HexBytes:
+        return HexBytes(b"".join(eip712_encode(self.eip712_structured_data)))
+
+    @property
     def safe_tx_hash(self) -> HexBytes:
-        return HexBytes(eip712_encode_hash(self.eip712_structured_data))
+        return HexBytes(fast_keccak(self.safe_tx_hash_preimage))
 
     @property
     def signers(self) -> List[str]:
@@ -203,7 +210,7 @@ class SafeTx:
         return sorted(self.signers, key=lambda x: int(x, 16))
 
     @property
-    def w3_tx(self):
+    def w3_tx(self) -> ContractFunction:
         """
         :return: Web3 contract tx prepared for `call`, `transact` or `build_transaction`
         """
@@ -377,7 +384,7 @@ class SafeTx:
         if tx_nonce is not None:
             tx_parameters["nonce"] = tx_nonce
 
-        self.tx = self.w3_tx.build_transaction(tx_parameters)
+        self.tx: TxParams = self.w3_tx.build_transaction(tx_parameters)
         self.tx["gas"] = Wei(
             tx_gas or (max(self.tx["gas"] + 75000, self.recommended_gas()))
         )

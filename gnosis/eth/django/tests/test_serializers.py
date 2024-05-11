@@ -1,12 +1,18 @@
 from django.test import TestCase
 
+from eth_account import Account
 from hexbytes import HexBytes
 from rest_framework import serializers
-from web3 import Web3
 
 from ...constants import NULL_ADDRESS, SENTINEL_ADDRESS
-from ...utils import get_eth_address_with_invalid_checksum, get_eth_address_with_key
-from ..serializers import EthereumAddressField, HexadecimalField, Sha3HashField
+from ...utils import fast_keccak_text, get_eth_address_with_invalid_checksum
+from ..serializers import (
+    EthereumAddressField,
+    HexadecimalField,
+    Sha3HashField,
+    Uint32Field,
+    Uint96Field,
+)
 
 
 class EthereumAddressSerializerTest(serializers.Serializer):
@@ -37,9 +43,17 @@ class Sha3HashSerializerTest(serializers.Serializer):
     value = Sha3HashField()
 
 
+class Uint96SerializerTest(serializers.Serializer):
+    value = Uint96Field()
+
+
+class Uint32SerializerTest(serializers.Serializer):
+    value = Uint32Field()
+
+
 class TestSerializers(TestCase):
     def test_ethereum_address_field(self):
-        valid_address, _ = get_eth_address_with_key()
+        valid_address = Account.create().address
         for value in [
             "0x674647242239941B2D35368E66A4EDc39b161Da1",
             "0x40f3F89639Bffc7B23Ca5d9FCb9ed9a9c579664A",
@@ -67,14 +81,14 @@ class TestSerializers(TestCase):
         self.assertIn("0x0 address is not allowed", serializer.errors["value"])
 
     def test_ethereum_zero_address_field(self):
-        valid_address, _ = get_eth_address_with_key()
+        valid_address = Account.create().address
         S = EthereumZeroAddressSerializerTest
         self.assertTrue(S(data={"value": valid_address}).is_valid())
         self.assertTrue(S(data={"value": NULL_ADDRESS}).is_valid())
         self.assertFalse(S(data={"value": SENTINEL_ADDRESS}).is_valid())
 
     def test_ethereum_sentinel_address_field(self):
-        valid_address, _ = get_eth_address_with_key()
+        valid_address = Account.create().address
         S = EthereumSentinelAddressSerializerTest
         self.assertTrue(S(data={"value": valid_address}).is_valid())
         self.assertTrue(S(data={"value": SENTINEL_ADDRESS}).is_valid())
@@ -133,7 +147,7 @@ class TestSerializers(TestCase):
             self.assertEqual(serializer.data["value"], HexBytes(hex_value).hex())
 
     def test_hash_serializer_field(self):
-        value = Web3.keccak(text="test").hex()
+        value = fast_keccak_text("test").hex()
         serializer = Sha3HashSerializerTest(data={"value": value})
         self.assertTrue(serializer.is_valid())
         self.assertEqual(serializer.validated_data["value"], HexBytes(value))
@@ -149,4 +163,47 @@ class TestSerializers(TestCase):
 
         # Hash with 2 less character - Less than 32 bytes
         serializer = Sha3HashSerializerTest(data={"value": value[:-2]})
+        self.assertFalse(serializer.is_valid())
+
+    def test_uint96_field(self):
+        value = None
+        serializer = Uint96SerializerTest(data={"value": value})
+        self.assertFalse(serializer.is_valid())
+
+        value = -1
+        serializer = Uint96SerializerTest(data={"value": value})
+        self.assertFalse(serializer.is_valid())
+
+        value = 1000
+        serializer = Uint96SerializerTest(data={"value": value})
+        self.assertTrue(serializer.is_valid())
+
+        value = 2**96
+        serializer = Uint96SerializerTest(data={"value": value})
+        self.assertTrue(serializer.is_valid())
+
+        value = 2**97
+        serializer = Uint96SerializerTest(data={"value": value})
+        self.assertFalse(serializer.is_valid())
+
+    def test_uint32_field(self):
+        value = None
+        serializer = Uint32SerializerTest(data={"value": value})
+        self.assertFalse(serializer.is_valid())
+
+        value = -1
+        serializer = Uint32SerializerTest(data={"value": value})
+        self.assertFalse(serializer.is_valid())
+
+        value = 1000
+        serializer = Uint32SerializerTest(data={"value": value})
+        self.assertTrue(serializer.is_valid())
+
+        value = 2**32
+        serializer = Uint32SerializerTest(data={"value": value})
+        self.assertTrue(serializer.is_valid())
+
+        # 2**33 still have the same number of digits than 2**32
+        value = 2**34
+        serializer = Uint32SerializerTest(data={"value": value})
         self.assertFalse(serializer.is_valid())

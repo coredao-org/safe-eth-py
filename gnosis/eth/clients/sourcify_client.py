@@ -1,14 +1,23 @@
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin
 
-import requests
+from gnosis.util import cache
 
+from ...util.http import prepare_http_session
 from .. import EthereumNetwork
 from ..utils import fast_is_checksum_address
 from .contract_metadata import ContractMetadata
 
 
-class Sourcify:
+class SourcifyClientException(Exception):
+    pass
+
+
+class SourcifyClientConfigurationProblem(Exception):
+    pass
+
+
+class SourcifyClient:
     """
     Get contract metadata from Sourcify. Matches can be full or partial:
 
@@ -23,30 +32,20 @@ class Sourcify:
     def __init__(
         self,
         network: EthereumNetwork = EthereumNetwork.MAINNET,
-        base_url: str = "https://repo.sourcify.dev/",
+        base_url_api: str = "https://sourcify.dev",
+        base_url_repo: str = "https://repo.sourcify.dev/",
         request_timeout: int = 10,
     ):
         self.network = network
-        self.base_url = base_url
-        self.http_session = self._prepare_http_session()
+        self.base_url_api = base_url_api
+        self.base_url_repo = base_url_repo
+        self.http_session = prepare_http_session(10, 100)
         self.request_timeout = request_timeout
 
-    def _prepare_http_session(self) -> requests.Session:
-        """
-        Prepare http session with custom pooling. See:
-        https://urllib3.readthedocs.io/en/stable/advanced-usage.html
-        https://docs.python-requests.org/en/v1.2.3/api/#requests.adapters.HTTPAdapter
-        https://web3py.readthedocs.io/en/stable/providers.html#httpprovider
-        """
-        session = requests.Session()
-        adapter = requests.adapters.HTTPAdapter(
-            pool_connections=10,
-            pool_maxsize=100,
-            pool_block=False,
-        )
-        session.mount("http://", adapter)
-        session.mount("https://", adapter)
-        return session
+        if not self.is_chain_supported(network.value):
+            raise SourcifyClientConfigurationProblem(
+                f"Network {network.name} - {network.value} not supported"
+            )
 
     def _get_abi_from_metadata(self, metadata: Dict[str, Any]) -> List[Dict[str, Any]]:
         return metadata["output"]["abi"]
@@ -63,6 +62,17 @@ class Sourcify:
 
         return response.json()
 
+    def is_chain_supported(self, chain_id: int) -> bool:
+        chains = self.get_chains()
+        if not chains:
+            raise IOError("Cannot get chains for SourcifyClient")
+        return chain_id in (int(chain["chainId"]) for chain in self.get_chains())
+
+    @cache
+    def get_chains(self) -> Dict[str, Any]:
+        url = urljoin(self.base_url_api, "/server/chains")
+        return self._do_request(url)
+
     def get_contract_metadata(
         self, contract_address: str
     ) -> Optional[ContractMetadata]:
@@ -72,7 +82,7 @@ class Sourcify:
 
         for match_type in ("full_match", "partial_match"):
             url = urljoin(
-                self.base_url,
+                self.base_url_repo,
                 f"/contracts/{match_type}/{self.network.value}/{contract_address}/metadata.json",
             )
             metadata = self._do_request(url)

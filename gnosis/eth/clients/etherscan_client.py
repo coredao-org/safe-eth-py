@@ -3,8 +3,7 @@ import time
 from typing import Any, Dict, Optional
 from urllib.parse import urljoin
 
-import requests
-
+from ...util.http import prepare_http_session
 from .. import EthereumNetwork
 from .contract_metadata import ContractMetadata
 
@@ -27,8 +26,7 @@ class EtherscanClient:
         EthereumNetwork.RINKEBY: "https://rinkeby.etherscan.io",
         EthereumNetwork.ROPSTEN: "https://ropsten.etherscan.io",
         EthereumNetwork.GOERLI: "https://goerli.etherscan.io",
-        EthereumNetwork.KOVAN: "https://kovan.etherscan.io",
-        EthereumNetwork.BINANCE_SMART_CHAIN_MAINNET: "https://bscscan.com",
+        EthereumNetwork.BNB_SMART_CHAIN_MAINNET: "https://bscscan.com",
         EthereumNetwork.POLYGON: "https://polygonscan.com",
         EthereumNetwork.POLYGON_ZKEVM: "https://zkevm.polygonscan.com",
         EthereumNetwork.OPTIMISM: "https://optimistic.etherscan.io",
@@ -36,17 +34,32 @@ class EtherscanClient:
         EthereumNetwork.ARBITRUM_NOVA: "https://nova.arbiscan.io",
         EthereumNetwork.ARBITRUM_GOERLI: "https://goerli.arbiscan.io",
         EthereumNetwork.AVALANCHE_C_CHAIN: "https://snowtrace.io",
+        EthereumNetwork.GNOSIS: "https://gnosisscan.io",
         EthereumNetwork.MOONBEAM: "https://moonscan.io",
         EthereumNetwork.MOONRIVER: "https://moonriver.moonscan.io",
         EthereumNetwork.MOONBASE_ALPHA: "https://moonbase.moonscan.io",
-        EthereumNetwork.CRONOS_MAINNET_BETA: "https://cronoscan.com",
+        EthereumNetwork.CRONOS_MAINNET: "https://cronoscan.com",
         EthereumNetwork.CRONOS_TESTNET: "https://testnet.cronoscan.com",
         EthereumNetwork.CELO_MAINNET: "https://celoscan.io",
         EthereumNetwork.BASE_GOERLI_TESTNET: "https://goerli.basescan.org",
-        EthereumNetwork.NEON_EVM_DEVNET: "https://neonscan.org",
         EthereumNetwork.CORE_BLOCKCHAIN_TESTNET: "https://scan.test.btcs.network",
         EthereumNetwork.CORE_BLOCKCHAIN_MAINNET: "https://scan.coredao.org",
+        EthereumNetwork.NEON_EVM_DEVNET: "https://devnet.neonscan.org",
+        EthereumNetwork.NEON_EVM_MAINNET: "https://neonscan.org",
         EthereumNetwork.SEPOLIA: "https://sepolia.etherscan.io",
+        EthereumNetwork.ZKSYNC_MAINNET: "https://explorer.zksync.io/",
+        EthereumNetwork.FANTOM_OPERA: "https://ftmscan.com",
+        EthereumNetwork.FANTOM_TESTNET: "https://testnet.ftmscan.com/",
+        EthereumNetwork.LINEA: "https://www.lineascan.build",
+        EthereumNetwork.LINEA_TESTNET: "https://goerli.lineascan.build",
+        EthereumNetwork.MANTLE: "https://explorer.mantle.xyz",
+        EthereumNetwork.MANTLE_TESTNET: "https://explorer.testnet.mantle.xyz",
+        EthereumNetwork.JAPAN_OPEN_CHAIN_MAINNET: "https://mainnet.japanopenchain.org",
+        EthereumNetwork.JAPAN_OPEN_CHAIN_TESTNET: "https://explorer.testnet.japanopenchain.org",
+        EthereumNetwork.SCROLL_SEPOLIA_TESTNET: "https://sepolia.scrollscan.dev",
+        EthereumNetwork.SCROLL: "https://scrollscan.com",
+        EthereumNetwork.KROMA: "https://kromascan.com",
+        EthereumNetwork.KROMA_SEPOLIA: "https://sepolia.kromascan.com",
     }
 
     NETWORK_WITH_API_URL = {
@@ -54,26 +67,41 @@ class EtherscanClient:
         EthereumNetwork.RINKEBY: "https://api-rinkeby.etherscan.io",
         EthereumNetwork.ROPSTEN: "https://api-ropsten.etherscan.io",
         EthereumNetwork.GOERLI: "https://api-goerli.etherscan.io",
-        EthereumNetwork.KOVAN: "https://api-kovan.etherscan.io",
-        EthereumNetwork.BINANCE_SMART_CHAIN_MAINNET: "https://api.bscscan.com",
+        EthereumNetwork.BNB_SMART_CHAIN_MAINNET: "https://api.bscscan.com",
         EthereumNetwork.POLYGON: "https://api.polygonscan.com",
         EthereumNetwork.POLYGON_ZKEVM: "https://api-zkevm.polygonscan.com",
         EthereumNetwork.OPTIMISM: "https://api-optimistic.etherscan.io",
         EthereumNetwork.ARBITRUM_ONE: "https://api.arbiscan.io",
         EthereumNetwork.ARBITRUM_NOVA: "https://api-nova.arbiscan.io",
         EthereumNetwork.ARBITRUM_GOERLI: "https://api-goerli.arbiscan.io",
+        EthereumNetwork.ARBITRUM_SEPOLIA: "https://api-sepolia.arbiscan.io",
         EthereumNetwork.AVALANCHE_C_CHAIN: "https://api.snowtrace.io",
+        EthereumNetwork.GNOSIS: "https://api.gnosisscan.io",
         EthereumNetwork.MOONBEAM: "https://api-moonbeam.moonscan.io",
         EthereumNetwork.MOONRIVER: "https://api-moonriver.moonscan.io",
         EthereumNetwork.MOONBASE_ALPHA: "https://api-moonbase.moonscan.io",
-        EthereumNetwork.CRONOS_MAINNET_BETA: "https://api.cronoscan.com",
+        EthereumNetwork.CRONOS_MAINNET: "https://api.cronoscan.com",
         EthereumNetwork.CRONOS_TESTNET: "https://api-testnet.cronoscan.com",
         EthereumNetwork.CELO_MAINNET: "https://api.celoscan.io",
         EthereumNetwork.BASE_GOERLI_TESTNET: "https://api-goerli.basescan.org",
         EthereumNetwork.NEON_EVM_DEVNET: "https://devnet-api.neonscan.org",
         EthereumNetwork.CORE_BLOCKCHAIN_TESTNET: "https://api.test.btcs.network/api",
         EthereumNetwork.CORE_BLOCKCHAIN_MAINNET: "https://openapi.coredao.org/api",
+        EthereumNetwork.NEON_EVM_MAINNET: "https://api.neonscan.org",
         EthereumNetwork.SEPOLIA: "https://api-sepolia.etherscan.io",
+        EthereumNetwork.ZKSYNC_MAINNET: "https://block-explorer-api.mainnet.zksync.io/",
+        EthereumNetwork.FANTOM_OPERA: "https://api.ftmscan.com",
+        EthereumNetwork.FANTOM_TESTNET: "https://api-testnet.ftmscan.com",
+        EthereumNetwork.LINEA: "https://api.lineascan.build",
+        EthereumNetwork.LINEA_TESTNET: "https://api-testnet.lineascan.build",
+        EthereumNetwork.MANTLE: "https://explorer.mantle.xyz",
+        EthereumNetwork.MANTLE_TESTNET: "https://explorer.testnet.mantle.xyz",
+        EthereumNetwork.JAPAN_OPEN_CHAIN_MAINNET: "https://mainnet.japanopenchain.org/api",
+        EthereumNetwork.JAPAN_OPEN_CHAIN_TESTNET: "https://explorer.testnet.japanopenchain.org/api",
+        EthereumNetwork.SCROLL_SEPOLIA_TESTNET: "https://api-sepolia.scrollscan.dev",
+        EthereumNetwork.SCROLL: "https://api.scrollscan.com",
+        EthereumNetwork.KROMA: "https://api.kromascan.com",
+        EthereumNetwork.KROMA_SEPOLIA: "https://api-sepolia.kromascan.com",
     }
     HTTP_HEADERS = {
         "User-Agent": "curl/7.77.0",
@@ -93,26 +121,9 @@ class EtherscanClient:
             raise EtherscanClientConfigurationProblem(
                 f"Network {network.name} - {network.value} not supported"
             )
-        self.http_session = self._prepare_http_session()
+        self.http_session = prepare_http_session(10, 100)
         self.http_session.headers = self.HTTP_HEADERS
         self.request_timeout = request_timeout
-
-    def _prepare_http_session(self) -> requests.Session:
-        """
-        Prepare http session with custom pooling. See:
-        https://urllib3.readthedocs.io/en/stable/advanced-usage.html
-        https://docs.python-requests.org/en/v1.2.3/api/#requests.adapters.HTTPAdapter
-        https://web3py.readthedocs.io/en/stable/providers.html#httpprovider
-        """
-        session = requests.Session()
-        adapter = requests.adapters.HTTPAdapter(
-            pool_connections=10,
-            pool_maxsize=100,
-            pool_block=False,
-        )
-        session.mount("http://", adapter)
-        session.mount("https://", adapter)
-        return session
 
     def build_url(self, path: str):
         url = urljoin(self.base_api_url, path)

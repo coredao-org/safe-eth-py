@@ -16,11 +16,10 @@ from typing import (
 )
 
 import eth_abi
-import requests
 from eth_abi.exceptions import DecodingError
 from eth_account import Account
 from eth_account.signers.local import LocalAccount
-from eth_typing import URI, BlockNumber, ChecksumAddress, Hash32, HexStr
+from eth_typing import URI, BlockNumber, ChecksumAddress, Hash32, HexAddress, HexStr
 from hexbytes import HexBytes
 from web3 import HTTPProvider, Web3
 from web3._utils.abi import map_abi_data
@@ -47,6 +46,7 @@ from web3.types import (
     FilterTrace,
     LogReceipt,
     Nonce,
+    TraceFilterParams,
     TxData,
     TxParams,
     TxReceipt,
@@ -57,20 +57,24 @@ from gnosis.eth.utils import (
     fast_is_checksum_address,
     fast_to_checksum_address,
     mk_contract_address,
+    mk_contract_address_2,
 )
 from gnosis.util import cache, chunks
 
+from ..util.http import prepare_http_session
 from .constants import (
     ERC20_721_TRANSFER_TOPIC,
     GAS_CALL_DATA_BYTE,
     GAS_CALL_DATA_ZERO_BYTE,
     NULL_ADDRESS,
+    SAFE_SINGLETON_FACTORY_ADDRESS,
 )
 from .contracts import get_erc20_contract, get_erc721_contract
 from .ethereum_network import EthereumNetwork, EthereumNetworkNotSupported
 from .exceptions import (
     BatchCallFunctionFailed,
     ChainIdIsRequired,
+    ContractAlreadyDeployed,
     FromAddressNotFound,
     GasLimitExceeded,
     InsufficientFunds,
@@ -86,7 +90,7 @@ from .exceptions import (
     TransactionQueueLimitReached,
     UnknownAccount,
 )
-from .typing import BalanceDict, EthereumData, EthereumHash
+from .typing import BalanceDict, EthereumData, EthereumHash, LogReceiptDecoded
 from .utils import decode_string_or_bytes32
 
 logger = getLogger(__name__)
@@ -144,7 +148,7 @@ def tx_with_exception_handling(func):
 class EthereumTxSent(NamedTuple):
     tx_hash: bytes
     tx: TxParams
-    contract_address: Optional[str]
+    contract_address: Optional[ChecksumAddress]
 
 
 class Erc20Info(NamedTuple):
@@ -176,10 +180,15 @@ class TxSpeed(Enum):
 class EthereumClientProvider:
     def __new__(cls):
         if not hasattr(cls, "instance"):
-            from django.conf import settings
+            try:
+                from django.conf import settings
+
+                ethereum_node_url = settings.ETHEREUM_NODE_URL
+            except ModuleNotFoundError:
+                ethereum_node_url = os.environ.get("ETHEREUM_NODE_URL")
 
             cls.instance = EthereumClient(
-                settings.ETHEREUM_NODE_URL,
+                ethereum_node_url,
                 provider_timeout=int(os.environ.get("ETHEREUM_RPC_TIMEOUT", 10)),
                 slow_provider_timeout=int(
                     os.environ.get("ETHEREUM_RPC_SLOW_TIMEOUT", 60)
@@ -410,7 +419,7 @@ class Erc20Manager(EthereumClientManager):
     # ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef
     TRANSFER_TOPIC = HexBytes(ERC20_721_TRANSFER_TOPIC)
 
-    def decode_logs(self, logs: List[LogReceipt]):
+    def decode_logs(self, logs: Sequence[LogReceipt]):
         decoded_logs = []
         for log in logs:
             decoded = self._decode_transfer_log(log["data"], log["topics"])
@@ -428,10 +437,17 @@ class Erc20Manager(EthereumClientManager):
             if topics_len == 1:
                 # Not standard Transfer(address from, address to, uint256 unknown)
                 # 1 topic (transfer topic)
-                _from, to, unknown = eth_abi.decode(
-                    ["address", "address", "uint256"], HexBytes(data)
-                )
-                return {"from": _from, "to": to, "unknown": unknown}
+                try:
+                    _from, to, unknown = eth_abi.decode(
+                        ["address", "address", "uint256"], HexBytes(data)
+                    )
+                    return {"from": _from, "to": to, "unknown": unknown}
+                except DecodingError:
+                    logger.warning(
+                        "Cannot decode Transfer event `address from, address to, uint256 unknown` from data=%s",
+                        data.hex() if isinstance(data, bytes) else data,
+                    )
+                    return None
             elif topics_len == 3:
                 # ERC20 Transfer(address indexed from, address indexed to, uint256 value)
                 # 3 topics (transfer topic + from + to)
@@ -452,26 +468,36 @@ class Erc20Manager(EthereumClientManager):
                             ["address", "address"], from_to_data
                         )
                     )
+                    return {"from": _from, "to": to, "value": value}
                 except DecodingError:
                     logger.warning(
                         "Cannot decode Transfer event `address from, address to` from topics=%s",
                         HexBytes(from_to_data).hex(),
                     )
                     return None
-                return {"from": _from, "to": to, "value": value}
             elif topics_len == 4:
                 # ERC712 Transfer(address indexed from, address indexed to, uint256 indexed tokenId)
                 # 4 topics (transfer topic + from + to + tokenId)
-                _from, to, token_id = eth_abi.decode(
-                    ["address", "address", "uint256"], b"".join(topics[1:])
-                )
-                _from, to = [
-                    fast_to_checksum_address(address) for address in (_from, to)
-                ]
-                return {"from": _from, "to": to, "tokenId": token_id}
+                try:
+                    from_to_token_id_data = b"".join(topics[1:])
+                    _from, to, token_id = eth_abi.decode(
+                        ["address", "address", "uint256"], from_to_token_id_data
+                    )
+                    _from, to = [
+                        fast_to_checksum_address(address) for address in (_from, to)
+                    ]
+                    return {"from": _from, "to": to, "tokenId": token_id}
+                except DecodingError:
+                    logger.warning(
+                        "Cannot decode Transfer event `address from, address to` from topics=%s",
+                        HexBytes(from_to_token_id_data).hex(),
+                    )
+                    return None
         return None
 
-    def get_balance(self, address: str, token_address: str) -> int:
+    def get_balance(
+        self, address: ChecksumAddress, token_address: ChecksumAddress
+    ) -> int:
         """
         Get balance of address for `erc20_address`
 
@@ -486,7 +512,7 @@ class Erc20Manager(EthereumClientManager):
         )
 
     def get_balances(
-        self, address: str, token_addresses: List[str]
+        self, address: ChecksumAddress, token_addresses: Sequence[ChecksumAddress]
     ) -> List[BalanceDict]:
         """
         Get balances for Ether and tokens for an `address`
@@ -520,7 +546,7 @@ class Erc20Manager(EthereumClientManager):
             }
         ] + return_balances
 
-    def get_name(self, erc20_address: str) -> str:
+    def get_name(self, erc20_address: ChecksumAddress) -> str:
         erc20 = get_erc20_contract(self.w3, erc20_address)
         data = erc20.functions.name().build_transaction(
             {"gas": Wei(0), "gasPrice": Wei(0)}
@@ -528,7 +554,7 @@ class Erc20Manager(EthereumClientManager):
         result = self.w3.eth.call({"to": erc20_address, "data": data})
         return decode_string_or_bytes32(result)
 
-    def get_symbol(self, erc20_address: str) -> str:
+    def get_symbol(self, erc20_address: ChecksumAddress) -> str:
         erc20 = get_erc20_contract(self.w3, erc20_address)
         data = erc20.functions.symbol().build_transaction(
             {"gas": Wei(0), "gasPrice": Wei(0)}
@@ -536,11 +562,11 @@ class Erc20Manager(EthereumClientManager):
         result = self.w3.eth.call({"to": erc20_address, "data": data})
         return decode_string_or_bytes32(result)
 
-    def get_decimals(self, erc20_address: str) -> int:
+    def get_decimals(self, erc20_address: ChecksumAddress) -> int:
         erc20 = get_erc20_contract(self.w3, erc20_address)
         return erc20.functions.decimals().call()
 
-    def get_info(self, erc20_address: str) -> Erc20Info:
+    def get_info(self, erc20_address: ChecksumAddress) -> Erc20Info:
         """
         Get erc20 information (`name`, `symbol` and `decimals`). Use batching to get
         all info in the same request.
@@ -594,7 +620,7 @@ class Erc20Manager(EthereumClientManager):
         from_block: BlockIdentifier = BlockNumber(0),
         to_block: Optional[BlockIdentifier] = None,
         token_address: Optional[ChecksumAddress] = None,
-    ) -> List[Dict[str, Any]]:
+    ) -> List[LogReceiptDecoded]:
         """
         Get events for erc20 and erc721 transfers from and to an `address`. We decode it manually.
         Example of an erc20 event:
@@ -684,19 +710,19 @@ class Erc20Manager(EthereumClientManager):
         if token_address:
             parameters["address"] = token_address
 
-        all_events: List[LogReceipt] = []
+        erc20_events = []
         # Do the request to `eth_getLogs`
         for topics in all_topics:
             parameters["topics"] = topics
-            all_events.extend(self.slow_w3.eth.get_logs(parameters))
 
-        # Decode events. Just pick valid ERC20 Transfer events (ERC721 `Transfer` has the same signature)
-        erc20_events = []
-        for event in all_events:
-            e = LogReceipt(event)  # Convert `AttributeDict` to `Dict`
-            e["args"] = self._decode_transfer_log(e["data"], e["topics"])
-            if e["args"]:
-                erc20_events.append(e)
+            # Decode events. Just pick valid ERC20 Transfer events (ERC721 `Transfer` has the same signature)
+            for event in self.slow_w3.eth.get_logs(parameters):
+                event["args"] = self._decode_transfer_log(
+                    event["data"], event["topics"]
+                )
+                if event["args"]:
+                    erc20_events.append(LogReceiptDecoded(event))
+
         erc20_events.sort(key=lambda x: x["blockNumber"])
         return erc20_events
 
@@ -761,7 +787,7 @@ class Erc20Manager(EthereumClientManager):
         self,
         to: str,
         amount: int,
-        erc20_address: str,
+        erc20_address: ChecksumAddress,
         private_key: str,
         nonce: Optional[int] = None,
         gas_price: Optional[int] = None,
@@ -800,7 +826,9 @@ class Erc721Manager(EthereumClientManager):
     # ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef
     TRANSFER_TOPIC = Erc20Manager.TRANSFER_TOPIC
 
-    def get_balance(self, address: str, token_address: str) -> int:
+    def get_balance(
+        self, address: ChecksumAddress, token_address: ChecksumAddress
+    ) -> int:
         """
         Get balance of address for `erc20_address`
 
@@ -815,7 +843,7 @@ class Erc721Manager(EthereumClientManager):
         )
 
     def get_balances(
-        self, address: str, token_addresses: List[str]
+        self, address: ChecksumAddress, token_addresses: Sequence[ChecksumAddress]
     ) -> List[TokenBalance]:
         """
         Get balances for tokens for an `address`. If there's a problem with a token_address `0` will be
@@ -825,10 +853,12 @@ class Erc721Manager(EthereumClientManager):
         :param token_addresses: token addresses to check
         :return:
         """
+        function = get_erc721_contract(self.ethereum_client.w3).functions.balanceOf(
+            address
+        )
         balances = self.ethereum_client.batch_call_same_function(
-            get_erc721_contract(self.ethereum_client.w3)
-            .functions.balanceOf(address)
-            .token_addresses,
+            function,
+            token_addresses,
             raise_exception=False,
         )
         return [
@@ -836,7 +866,7 @@ class Erc721Manager(EthereumClientManager):
             for (token_address, balance) in zip(token_addresses, balances)
         ]
 
-    def get_info(self, token_address: str) -> Erc721Info:
+    def get_info(self, token_address: ChecksumAddress) -> Erc721Info:
         """
         Get erc721 information (`name`, `symbol`). Use batching to get
         all info in the same request.
@@ -860,14 +890,16 @@ class Erc721Manager(EthereumClientManager):
             raise InvalidERC721Info
 
     def get_owners(
-        self, token_addresses_with_token_ids: Sequence[Tuple[str, int]]
+        self, token_addresses_with_token_ids: Sequence[Tuple[ChecksumAddress, int]]
     ) -> List[Optional[ChecksumAddress]]:
         """
         :param token_addresses_with_token_ids: Tuple(token_address: str, token_id: int)
         :return: List of owner addresses, `None` if not found
         """
         return [
-            ChecksumAddress(owner) if isinstance(owner, str) else None
+            ChecksumAddress(HexAddress(HexStr(owner)))
+            if isinstance(owner, str)
+            else None
             for owner in self.ethereum_client.batch_call(
                 [
                     get_erc721_contract(
@@ -880,7 +912,7 @@ class Erc721Manager(EthereumClientManager):
         ]
 
     def get_token_uris(
-        self, token_addresses_with_token_ids: Sequence[Tuple[str, int]]
+        self, token_addresses_with_token_ids: Sequence[Tuple[ChecksumAddress, int]]
     ) -> List[Optional[str]]:
         """
         :param token_addresses_with_token_ids: Tuple(token_address: str, token_id: int)
@@ -963,7 +995,7 @@ class TracingManager(EthereumClientManager):
         trace_address: Sequence[int],
         remove_delegate_calls: bool = False,
         remove_calls: bool = False,
-    ) -> List[Dict[str, Any]]:
+    ) -> List[FilterTrace]:
         """
         :param tx_hash:
         :param trace_address:
@@ -973,7 +1005,7 @@ class TracingManager(EthereumClientManager):
         :raises: ``ValueError`` if tracing is not supported
         """
         trace_address_len = len(trace_address)
-        traces = []
+        traces: List[FilterTrace] = []
         for trace in self.trace_transaction(tx_hash):
             if (
                 trace_address_len + 1 == len(trace["traceAddress"])
@@ -994,7 +1026,7 @@ class TracingManager(EthereumClientManager):
         return self.slow_w3.tracing.trace_block(block_identifier)
 
     def trace_blocks(
-        self, block_identifiers: List[BlockIdentifier]
+        self, block_identifiers: Sequence[BlockIdentifier]
     ) -> List[List[Dict[str, Any]]]:
         if not block_identifiers:
             return []
@@ -1128,7 +1160,7 @@ class TracingManager(EthereumClientManager):
         assert (
             from_address or to_address
         ), "You must provide at least `from_address` or `to_address`"
-        parameters: FilterParams = {}
+        parameters: TraceFilterParams = {}
         if after:
             parameters["after"] = after
         if count:
@@ -1170,10 +1202,12 @@ class EthereumClient:
         :param use_caching_middleware: Use web3 simple cache middleware: https://web3py.readthedocs.io/en/stable/middleware.html#web3.middleware.construct_simple_cache_middleware
         :param batch_request_max_size: Max size for JSON RPC Batch requests. Some providers have a limitation on 500
         """
-        self.http_session = self._prepare_http_session(retry_count)
+        self.http_session = prepare_http_session(1, 100, retry_count=retry_count)
         self.ethereum_node_url: str = ethereum_node_url
         self.timeout = provider_timeout
         self.slow_timeout = slow_provider_timeout
+        self.use_caching_middleware = use_caching_middleware
+
         self.w3_provider = HTTPProvider(
             self.ethereum_node_url,
             request_kwargs={"timeout": provider_timeout},
@@ -1186,47 +1220,38 @@ class EthereumClient:
         )
         self.w3: Web3 = Web3(self.w3_provider)
         self.slow_w3: Web3 = Web3(self.w3_slow_provider)
+
+        # Adjust Web3.py middleware
+        for w3 in self.w3, self.slow_w3:
+            # Don't spend resources con converting dictionaries to attribute dictionaries
+            w3.middleware_onion.remove("attrdict")
+            # Disable web3 automatic retry, it's handled on our HTTP Session
+            w3.provider.middlewares = []
+            if self.use_caching_middleware:
+                w3.middleware_onion.add(simple_cache_middleware)
+
+        # The geth_poa_middleware is required to connect to geth --dev or the Goerli public network.
+        # It may also be needed for other EVM compatible blockchains like Polygon or BNB Chain (Binance Smart Chain).
+        try:
+            if self.get_network() != EthereumNetwork.MAINNET:
+                for w3 in self.w3, self.slow_w3:
+                    w3.middleware_onion.inject(geth_poa_middleware, layer=0)
+        except (IOError, OSError):
+            # For tests using dummy connections (like IPC)
+            for w3 in self.w3, self.slow_w3:
+                w3.middleware_onion.inject(geth_poa_middleware, layer=0)
+
         self.erc20: Erc20Manager = Erc20Manager(self)
         self.erc721: Erc721Manager = Erc721Manager(self)
         self.tracing: TracingManager = TracingManager(self)
         self.batch_call_manager: BatchCallManager = BatchCallManager(self)
-        try:
-            if self.get_network() != EthereumNetwork.MAINNET:
-                self.w3.middleware_onion.inject(geth_poa_middleware, layer=0)
-            # For tests using dummy connections (like IPC)
-        except (IOError, FileNotFoundError):
-            self.w3.middleware_onion.inject(geth_poa_middleware, layer=0)
-
-        self.use_caching_middleware = use_caching_middleware
-        if self.use_caching_middleware:
-            self.w3.middleware_onion.add(simple_cache_middleware)
-            self.slow_w3.middleware_onion.add(simple_cache_middleware)
-
         self.batch_request_max_size = batch_request_max_size
 
     def __str__(self):
         return f"EthereumClient for url={self.ethereum_node_url}"
 
-    def _prepare_http_session(self, retry_count: int) -> requests.Session:
-        """
-        Prepare http session with custom pooling. See:
-        https://urllib3.readthedocs.io/en/stable/advanced-usage.html
-        https://docs.python-requests.org/en/v1.2.3/api/#requests.adapters.HTTPAdapter
-        https://web3py.readthedocs.io/en/stable/providers.html#httpprovider
-        """
-        session = requests.Session()
-        adapter = requests.adapters.HTTPAdapter(
-            pool_connections=1,  # Doing all the connections to the same url
-            pool_maxsize=100,  # Number of concurrent connections
-            max_retries=retry_count,  # Nodes are not very responsive some times
-            pool_block=False,
-        )
-        session.mount("http://", adapter)
-        session.mount("https://", adapter)
-        return session
-
     def raw_batch_request(
-        self, payload: List[Dict[str, Any]], batch_size: Optional[int] = None
+        self, payload: Sequence[Dict[str, Any]], batch_size: Optional[int] = None
     ) -> Iterable[Optional[Dict[str, Any]]]:
         """
         Perform a raw batch JSON RPC call
@@ -1304,7 +1329,24 @@ class EthereumClient:
         return EthereumNetwork(self.get_chain_id())
 
     @cache
-    def is_eip1559_supported(self) -> EthereumNetwork:
+    def get_singleton_factory_address(self) -> Optional[ChecksumAddress]:
+        """
+        Get singleton factory address if available. Try the singleton managed by Safe by default unless
+        SAFE_SINGLETON_FACTORY_ADDRESS environment variable is defined.
+
+        More info: https://github.com/safe-global/safe-singleton-factory
+
+        :return: Get singleton factory address if available
+        """
+        address = os.environ.get(
+            "SAFE_SINGLETON_FACTORY_ADDRESS", SAFE_SINGLETON_FACTORY_ADDRESS
+        )
+        if self.is_contract(address):
+            return address
+        return None
+
+    @cache
+    def is_eip1559_supported(self) -> bool:
         """
         :return: `True` if EIP1559 is supported by the node, `False` otherwise
         """
@@ -1408,14 +1450,25 @@ class EthereumClient:
     def deploy_and_initialize_contract(
         self,
         deployer_account: LocalAccount,
-        constructor_data: bytes,
-        initializer_data: bytes = b"",
+        constructor_data: Union[bytes, HexStr],
+        initializer_data: Optional[Union[bytes, HexStr]] = None,
         check_receipt: bool = True,
-    ):
+        deterministic: bool = True,
+    ) -> EthereumTxSent:
+        """
+
+        :param deployer_account:
+        :param constructor_data:
+        :param initializer_data:
+        :param check_receipt:
+        :param deterministic: Use Safe singleton factory for CREATE2 deterministic deployment
+        :return:
+        """
         contract_address: Optional[ChecksumAddress] = None
         for data in (constructor_data, initializer_data):
             # Because initializer_data is not mandatory
             if data:
+                data = HexBytes(data)
                 tx: TxParams = {
                     "from": deployer_account.address,
                     "data": data,
@@ -1423,7 +1476,28 @@ class EthereumClient:
                     "value": Wei(0),
                     "to": contract_address if contract_address else "",
                     "chainId": self.get_chain_id(),
+                    "nonce": self.get_nonce_for_account(deployer_account.address),
                 }
+                if not contract_address:
+                    if deterministic and (
+                        singleton_factory_address := self.get_singleton_factory_address()
+                    ):
+                        salt = HexBytes("0" * 64)
+                        tx["data"] = (
+                            salt + data
+                        )  # Add 32 bytes salt for singleton factory
+                        tx["to"] = singleton_factory_address
+                        contract_address = mk_contract_address_2(
+                            singleton_factory_address, salt, data
+                        )
+                        if self.is_contract(contract_address):
+                            raise ContractAlreadyDeployed(
+                                f"Contract {contract_address} already deployed",
+                                contract_address,
+                            )
+                    else:
+                        contract_address = mk_contract_address(tx["from"], tx["nonce"])
+
                 tx["gas"] = self.w3.eth.estimate_gas(tx)
                 tx_hash = self.send_unsigned_transaction(
                     tx, private_key=deployer_account.key
@@ -1434,11 +1508,6 @@ class EthereumClient:
                     )
                     assert tx_receipt
                     assert tx_receipt["status"]
-
-                if not contract_address:
-                    contract_address = ChecksumAddress(
-                        mk_contract_address(tx["from"], tx["nonce"])
-                    )
 
         return EthereumTxSent(tx_hash, tx, contract_address)
 
@@ -1505,6 +1574,12 @@ class EthereumClient:
 
     @staticmethod
     def estimate_data_gas(data: bytes):
+        """
+        Estimate gas costs only for "storage" of the ``data`` bytes provided
+
+        :param data:
+        :return:
+        """
         if isinstance(data, str):
             data = HexBytes(data)
 
@@ -1554,7 +1629,7 @@ class EthereumClient:
         :raises: ValueError if EIP1559 not supported
         """
         base_fee_per_gas, max_priority_fee_per_gas = self.estimate_fee_eip1559(tx_speed)
-        tx = dict(tx)  # Don't modify provided tx
+        tx = TxParams(tx)  # Don't modify provided tx
         if "gasPrice" in tx:
             del tx["gasPrice"]
 
@@ -1578,7 +1653,9 @@ class EthereumClient:
         except TransactionNotFound:
             return None
 
-    def get_transactions(self, tx_hashes: List[EthereumHash]) -> List[Optional[TxData]]:
+    def get_transactions(
+        self, tx_hashes: Sequence[EthereumHash]
+    ) -> List[Optional[TxData]]:
         if not tx_hashes:
             return []
         payload = [
@@ -1697,6 +1774,57 @@ class EthereumClient:
 
     def is_contract(self, contract_address: ChecksumAddress) -> bool:
         return bool(self.w3.eth.get_code(contract_address))
+
+    @staticmethod
+    def build_tx_params(
+        from_address: Optional[ChecksumAddress] = None,
+        to_address: Optional[ChecksumAddress] = None,
+        value: Optional[int] = None,
+        gas: Optional[int] = None,
+        gas_price: Optional[int] = None,
+        nonce: Optional[int] = None,
+        chain_id: Optional[int] = None,
+        tx_params: Optional[TxParams] = None,
+    ) -> TxParams:
+        """
+        Build tx params dictionary.
+        If an existing TxParams dictionary is provided the fields will be replaced by the provided ones
+
+        :param from_address:
+        :param to_address:
+        :param value:
+        :param gas:
+        :param gas_price:
+        :param nonce:
+        :param chain_id:
+        :param tx_params: An existing TxParams dictionary will be replaced by the providen values
+        :return:
+        """
+
+        tx_params: TxParams = tx_params or {}
+
+        if from_address:
+            tx_params["from"] = from_address
+
+        if to_address:
+            tx_params["to"] = to_address
+
+        if value is not None:
+            tx_params["value"] = value
+
+        if gas_price is not None:
+            tx_params["gasPrice"] = gas_price
+
+        if gas is not None:
+            tx_params["gas"] = gas
+
+        if nonce is not None:
+            tx_params["nonce"] = nonce
+
+        if chain_id is not None:
+            tx_params["chainId"] = chain_id
+
+        return tx_params
 
     @tx_with_exception_handling
     def send_transaction(self, transaction_dict: TxParams) -> HexBytes:

@@ -24,7 +24,6 @@ from ..ethereum_client import (
     TracingManager,
 )
 from ..exceptions import BatchCallException, ChainIdIsRequired, InvalidERC20Info
-from ..utils import get_eth_address_with_key
 from .ethereum_test_case import EthereumTestCaseMixin
 from .mocks.mock_internal_txs import creation_internal_txs, internal_txs_errored
 from .mocks.mock_log_receipts import invalid_log_receipt, log_receipts
@@ -35,7 +34,7 @@ from .mocks.mock_trace_block import (
 )
 from .mocks.mock_trace_filter import trace_filter_mock_1
 from .mocks.mock_trace_transaction import trace_transaction_mocks
-from .utils import deploy_example_erc20, just_test_if_mainnet_node
+from .utils import just_test_if_mainnet_node
 
 
 class TestERC20Module(EthereumTestCaseMixin, TestCase):
@@ -239,10 +238,10 @@ class TestERC20Module(EthereumTestCaseMixin, TestCase):
 
     def test_get_total_transfer_history(self):
         amount = 50
-        owner_account = self.create_account(initial_ether=0.01)
-        account_1 = self.create_account(initial_ether=0.01)
-        account_2 = self.create_account(initial_ether=0.01)
-        account_3 = self.create_account(initial_ether=0.01)
+        owner_account = self.create_and_fund_account(initial_ether=0.01)
+        account_1 = self.create_and_fund_account(initial_ether=0.01)
+        account_2 = self.create_and_fund_account(initial_ether=0.01)
+        account_3 = self.create_and_fund_account(initial_ether=0.01)
         erc20_contract = self.deploy_example_erc20(amount, owner_account.address)
         # `owner` sends `amount // 2` to `account_1` and `account_3`
         self.send_tx(
@@ -301,13 +300,13 @@ class TestERC20Module(EthereumTestCaseMixin, TestCase):
 
     def test_get_transfer_history(self):
         amount = 1000
-        owner_account = self.create_account(initial_ether=0.01)
+        owner_account = self.create_and_fund_account(initial_ether=0.01)
 
         # Owner will send amount / 2 to receiver and receiver2. Then receiver1 and receiver 2
         # will send amount / 4 to receiver3
-        receiver_account = self.create_account(initial_ether=0.01)
-        receiver2_account = self.create_account(initial_ether=0.01)
-        receiver3_account = self.create_account(initial_ether=0.01)
+        receiver_account = self.create_and_fund_account(initial_ether=0.01)
+        receiver2_account = self.create_and_fund_account(initial_ether=0.01)
+        receiver3_account = self.create_and_fund_account(initial_ether=0.01)
         erc20_contract = self.deploy_example_erc20(amount, owner_account.address)
         block_number = self.w3.eth.block_number
         events = self.ethereum_client.erc20.get_transfer_history(
@@ -376,8 +375,8 @@ class TestERC20Module(EthereumTestCaseMixin, TestCase):
         )
         self.assertEqual(len(events), 2)
         for event in events:
-            self.assertEqual(event.args.value, amount // 4)
-            self.assertEqual(event.args.to, receiver3_account.address)
+            self.assertEqual(event["args"]["value"], amount // 4)
+            self.assertEqual(event["args"]["to"], receiver3_account.address)
 
         events = self.ethereum_client.erc20.get_transfer_history(
             block_number,
@@ -386,9 +385,9 @@ class TestERC20Module(EthereumTestCaseMixin, TestCase):
         )
         self.assertEqual(len(events), 1)
         event = events[0]
-        self.assertEqual(event.args.value, amount // 4)
-        self.assertEqual(event.args["from"], receiver2_account.address)
-        self.assertEqual(event.args.to, receiver3_account.address)
+        self.assertEqual(event["args"]["value"], amount // 4)
+        self.assertEqual(event["args"]["from"], receiver2_account.address)
+        self.assertEqual(event["args"]["to"], receiver3_account.address)
 
     def test_get_info(self):
         amount = 1
@@ -751,10 +750,10 @@ class TestEthereumClient(EthereumTestCaseMixin, TestCase):
         value = 123
         tx_hash = self.send_ether(to, value)
         tx = self.ethereum_client.get_transaction(tx_hash)
-        self.assertEqual(tx.to, to)
-        self.assertEqual(tx.value, value)
-        block = self.ethereum_client.get_block(tx.blockNumber)
-        self.assertEqual(block.number, tx.blockNumber)
+        self.assertEqual(tx["to"], to)
+        self.assertEqual(tx["value"], value)
+        block = self.ethereum_client.get_block(tx["blockNumber"])
+        self.assertEqual(block["number"], tx["blockNumber"])
 
     def test_get_transactions(self):
         self.assertEqual(self.ethereum_client.get_transactions([]), [])
@@ -774,7 +773,7 @@ class TestEthereumClient(EthereumTestCaseMixin, TestCase):
 
     def test_check_tx_with_confirmations(self):
         value = 1
-        to, _ = get_eth_address_with_key()
+        to = Account.create().address
 
         tx_hash = self.ethereum_client.send_eth_to(
             self.ethereum_test_account.key, to=to, gas_price=self.gas_price, value=value
@@ -794,7 +793,7 @@ class TestEthereumClient(EthereumTestCaseMixin, TestCase):
     def test_estimate_gas(self):
         send_ether_gas = 21000
         from_ = self.ethereum_test_account.address
-        to, _ = get_eth_address_with_key()
+        to = Account.create().address
         gas = self.ethereum_client.estimate_gas(
             to, from_=from_, value=5, data=None, block_identifier="pending"
         )
@@ -812,7 +811,7 @@ class TestEthereumClient(EthereumTestCaseMixin, TestCase):
         amount_to_send = amount_tokens // 2
         from_account = self.ethereum_test_account
         from_ = from_account.address
-        to, _ = get_eth_address_with_key()
+        to = Account.create().address
 
         erc20_contract = self.deploy_example_erc20(amount_tokens, from_)
         transfer_tx = erc20_contract.functions.transfer(
@@ -928,7 +927,7 @@ class TestEthereumClient(EthereumTestCaseMixin, TestCase):
         self.assertEqual(ethereum_client1, ethereum_client2)
 
     def test_send_eth_to(self):
-        address, _ = get_eth_address_with_key()
+        address = Account.create().address
         value = 1
         self.ethereum_client.send_eth_to(
             self.ethereum_test_account.key, address, self.gas_price, value
@@ -942,7 +941,7 @@ class TestEthereumClient(EthereumTestCaseMixin, TestCase):
     def test_send_transaction(self):
         account = self.ethereum_test_account
         address = account.address
-        to, _ = get_eth_address_with_key()
+        to = Account.create().address
         value = 1
         tx = {
             "to": to,
@@ -975,7 +974,7 @@ class TestEthereumClient(EthereumTestCaseMixin, TestCase):
     def test_send_unsigned_transaction(self):
         account = self.ethereum_test_account
         address = account.address
-        to, _ = get_eth_address_with_key()
+        to = Account.create().address
         value = 4
 
         tx = {
@@ -1015,9 +1014,9 @@ class TestEthereumClient(EthereumTestCaseMixin, TestCase):
 
     @pytest.mark.xfail(reason="Last ganache-cli version broke the test")
     def test_send_unsigned_transaction_with_private_key(self):
-        account = self.create_account(initial_ether=0.1)
+        account = self.create_and_fund_account(initial_ether=0.1)
         key = account.key
-        to, _ = get_eth_address_with_key()
+        to = Account.create().address
         value = 4
 
         tx = {
@@ -1176,9 +1175,7 @@ class TestEthereumClient(EthereumTestCaseMixin, TestCase):
             self.ethereum_client.is_contract(self.ethereum_test_account.address)
         )
 
-        erc20 = deploy_example_erc20(
-            self.ethereum_client.w3, 2, self.ethereum_test_account.address
-        )
+        erc20 = self.deploy_example_erc20(2, self.ethereum_test_account.address)
         self.assertTrue(self.ethereum_client.is_contract(erc20.address))
 
     def test_is_eip1559_supported(self):

@@ -14,8 +14,8 @@ Ethereum utils
 gnosis.eth
 ~~~~~~~~~~
 - ``class EthereumClient (ethereum_node_url: str)``: Class to connect and do operations
-  with a ethereum node. Uses web3 and raw rpc calls for things not supported in web3.
-  Only ``http/https`` urls are suppored for the node url.
+  with an ethereum node. Uses web3 and raw rpc calls for things not supported in web3.
+  Only ``http/https`` urls are supported for the node url.
 
 ``EthereumClient`` has some utils that improve a lot performance using Ethereum nodes, like
 the possibility of doing ``batch_calls`` (a single request making read-only calls to multiple contracts):
@@ -25,7 +25,7 @@ the possibility of doing ``batch_calls`` (a single request making read-only call
   from gnosis.eth import EthereumClient
   from gnosis.eth.contracts import get_erc721_contract
   ethereum_client = EthereumClient(ETHEREUM_NODE_URL)
-  erc721_contract = get_erc721_contract(self.w3, token_address)
+  erc721_contract = get_erc721_contract(ethereum_client.w3, token_address)
   name, symbol = ethereum_client.batch_call([
                       erc721_contract.functions.name(),
                       erc721_contract.functions.symbol(),
@@ -38,7 +38,7 @@ More optimal in case you want to call the same function in multiple contracts
   from gnosis.eth import EthereumClient
   from gnosis.eth.contracts import get_erc20_contract
   ethereum_client = EthereumClient(ETHEREUM_NODE_URL)
-  erc20_contract = get_erc20_contract(self.w3, token_address)
+  erc20_contract = get_erc20_contract(ethereum_client.w3, token_address)
   my_account = '0xD0E03B027A367fED4fd0E7834a82CD8A73E76B45'
   name, symbol = ethereum_client.batch_call_same_function(
                       erc20_contract.functions.balanceOf(my_account),
@@ -74,7 +74,7 @@ gnosis.eth.constants
 ~~~~~~~~~~~~~~~~~~~~
 - ``NULL_ADDRESS (0x000...0)``: Solidity ``address(0)``.
 - ``SENTINEL_ADDRESS (0x000...1)``: Used for Gnosis Safe's linked lists (modules, owners...).
-- Maximum an minimum values for `R`, `S` and `V` in ethereum signatures.
+- Maximum and minimum values for `R`, `S` and `V` in ethereum signatures.
 
 gnosis.eth.eip712
 ~~~~~~~~~~~~~~~~~~~~
@@ -139,8 +139,6 @@ gnosis.eth.utils
 
 Contains utils for ethereum operations:
 
-- ``get_eth_address_with_key() -> Tuple[str, bytes]``: Returns a tuple of a valid public ethereum checksumed
-  address with the private key.
 - ``mk_contract_address_2(from_: Union[str, bytes], salt: Union[str, bytes], init_code: [str, bytes]) -> str``:
   Calculates the address of a new contract created using the new CREATE2 opcode.
 
@@ -184,21 +182,21 @@ To work with Multisig Transactions:
   safe_tx.call()  # Check it works
   safe_tx.execute(tx_sender_private_key)
 
-Protocol
+CowSwap
 ~~~~~~~~
-On ``gnosis.protocol`` there're classes to work with `Gnosis Protocol v2 <https://docs.cowswap.app>`_
+On ``gnosis.cowswap`` there're classes to work with `CowSwap <https://docs.cowswap.app>`_
 
 .. code-block:: python
 
   import time
   from gnosis.eth import EthereumNetwork
-  from gnosis.protocol import Order, OrderKind, GnosisProtocolAPI
+  from gnosis.cowswap import Order, OrderKind, CowSwapAPI
 
-  account_address = ''  # Fill with checksummed version of a Gnosis Protocol user address
+  account_address = ''  # Fill with checksummed version of a CowSwap user address
   account_private_key = ''  # Fill with private key of a user address
-  gnosis_protocol_api = GnosisProtocolAPI(EthereumNetwork.RINKEBY)
-  print(gnosis_protocol_api.get_trades(owner=account_address))
-  buy_amount = gnosis_protocol_api.get_estimated_amount(base_token, quote_token, OrderKind.SELL, sell_amount)
+  cow_swap_api = CowSwapAPI(EthereumNetwork.SEPOLIA)
+  print(cow_swap_api.get_trades(owner=account_address))
+  buy_amount = cow_swap_api.get_estimated_amount(base_token, quote_token, OrderKind.SELL, sell_amount)
   valid_to = int(time.time() + (24 * 60 * 60))  # Order valid for 1 day
   order = Order(
         sellToken=base_token,
@@ -207,11 +205,11 @@ On ``gnosis.protocol`` there're classes to work with `Gnosis Protocol v2 <https:
         sellAmount=sell_amount,
         buyAmount=buy_amount,
         validTo=valid_to,  # timestamp
-        appData=ipfs_hash,  # IPFS hash for metadata
+        appData={},  # Dict with CowSwap AppData schema definition (https://github.com/cowprotocol/app-data)
         fee_amount=0,  # If set to `0` it will be autodetected
         kind='sell',  # `sell` or `buy`
         partiallyFillable=True,  # `True` or `False`
         sellTokenBalance='erc20',  # `erc20`, `external` or `internal`
         buyTokenBalance='erc20',  # `erc20` or `internal`
     )
-  gnosis_protocol_api.place_order(order, account_private_key)
+  cow_swap_api.place_order(order, account_private_key)

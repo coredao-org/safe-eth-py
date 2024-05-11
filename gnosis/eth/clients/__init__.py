@@ -5,22 +5,30 @@ from .blockscout_client import (
     BlockScoutConfigurationProblem,
 )
 from .contract_metadata import ContractMetadata
+from .ens_client import EnsClient
 from .etherscan_client import (
     EtherscanClient,
     EtherscanClientConfigurationProblem,
     EtherscanClientException,
     EtherscanRateLimitError,
 )
-from .sourcify import Sourcify
+from .sourcify_client import (
+    SourcifyClient,
+    SourcifyClientConfigurationProblem,
+    SourcifyClientException,
+)
 
 __all__ = [
+    "BlockScoutConfigurationProblem",
     "BlockscoutClient",
     "BlockscoutClientException",
-    "BlockScoutConfigurationProblem",
     "ContractMetadata",
+    "EnsClient",
     "EtherscanClient",
     "EtherscanClientConfigurationProblem",
     "EtherscanClientException",
     "EtherscanRateLimitError",
-    "Sourcify",
+    "SourcifyClient",
+    "SourcifyClientConfigurationProblem",
+    "SourcifyClientException",
 ]
